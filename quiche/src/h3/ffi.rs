@@ -30,7 +30,6 @@ use std::convert::TryFrom;
 use std::ptr;
 use std::slice;
 
-use libc::c_char;
 use libc::c_int;
 use libc::c_void;
 use libc::size_t;

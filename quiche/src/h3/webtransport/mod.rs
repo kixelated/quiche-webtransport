@@ -841,6 +841,18 @@ impl ServerSession {
                 _ => Ok(ServerEvent::Other(session_id, h3::Event::Datagram)),
             },
 
+            Ok((
+                   prioritized_element_id,
+                   h3::Event::PriorityUpdate,
+               )) => {
+                info!(
+                        "{} PRIORITY_UPDATE triggered for element ID={}",
+                        conn.trace_id(),
+                        prioritized_element_id
+                    );
+                Ok(ServerEvent::Other(prioritized_element_id,h3::Event::PriorityUpdate))
+            },
+
             Ok((stream_id, h3::Event::GoAway)) => match self.state {
                 ServerState::Requested(sid) | ServerState::Connected(sid) => {
                     if sid == stream_id {
@@ -1231,6 +1243,18 @@ impl ClientSession {
                 _ => Ok(ClientEvent::Other(session_id, h3::Event::Datagram)),
             },
 
+            Ok((
+                   prioritized_element_id,
+                   h3::Event::PriorityUpdate,
+               )) => {
+                info!(
+                        "{} PRIORITY_UPDATE triggered for element ID={}",
+                        conn.trace_id(),
+                        prioritized_element_id
+                    );
+                Ok(ClientEvent::Other(prioritized_element_id,h3::Event::PriorityUpdate))
+            },
+
             Ok((stream_id, h3::Event::GoAway)) => match self.state {
                 ClientState::Requesting(sid) | ClientState::Connected(sid) => {
                     if sid == stream_id {
@@ -1411,7 +1435,7 @@ pub mod testing {
             let mut config = crate::Config::new(crate::PROTOCOL_VERSION)?;
             config.load_cert_chain_from_pem_file("examples/cert.crt")?;
             config.load_priv_key_from_pem_file("examples/cert.key")?;
-            config.set_application_protos(b"\x02h3")?;
+            config.set_application_protos(&[b"\x02h3"])?;
             config.set_initial_max_data(1500);
             config.set_initial_max_stream_data_bidi_local(150);
             config.set_initial_max_stream_data_bidi_remote(150);

@@ -223,7 +223,7 @@ Version: {}
 Libs: -Wl,-rpath,${{libdir}} -L${{libdir}} -lquiche
 Cflags: -I${{includedir}}
 ",
-        target_dir.to_str().unwrap(),
+        target_dir.to_str().unwrap(),version
     );
 
     out_file.write_all(output.as_bytes()).unwrap();

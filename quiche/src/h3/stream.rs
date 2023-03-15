@@ -57,6 +57,7 @@ impl Type {
             Type::Push => qlog::events::h3::H3StreamType::Push,
             Type::QpackEncoder => qlog::events::h3::H3StreamType::QpackEncode,
             Type::QpackDecoder => qlog::events::h3::H3StreamType::QpackDecode,
+            Type::WebTransport => qlog::events::h3::H3StreamType::WebTransport,
             Type::Unknown => qlog::events::h3::H3StreamType::Unknown,
         }
     }
