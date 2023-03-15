@@ -27,35 +27,39 @@
 #[macro_use]
 extern crate log;
 
+use std::fs;
 use std::net;
 
 use std::collections::HashMap;
+use std::pin::Pin;
 
+use boring::asn1::Asn1Time;
+use boring::bn::BigNum;
+use boring::bn::MsbOption;
+use boring::ec::EcGroup;
+use boring::ec::EcKey;
+use boring::hash::MessageDigest;
+use boring::pkey::PKey;
+use boring::x509::extension::BasicConstraints;
+use env_logger::Env;
+use quiche::h3::webtransport::ServerSession;
 use ring::rand::*;
 
-use quiche::h3::NameValue;
-
 const MAX_DATAGRAM_SIZE: usize = 1350;
-
-struct PartialResponse {
-    headers: Option<Vec<quiche::h3::Header>>,
-
-    body: Vec<u8>,
-
-    written: usize,
-}
-
 struct Client {
-    conn: quiche::Connection,
+    conn: Pin<Box<quiche::Connection>>,
 
-    http3_conn: Option<quiche::h3::Connection>,
-
-    partial_responses: HashMap<u64, PartialResponse>,
+    session: Option<ServerSession>,
 }
 
 type ClientMap = HashMap<quiche::ConnectionId<'static>, Client>;
 
+// A WebTransport Server. In order to connect to this server you'll need a web frontend such
+// as the example frontend provided in `webtransport-server-public/index.html`
 fn main() {
+    env_logger::Builder::from_env(Env::default().default_filter_or("info"))
+        .init();
+
     let mut buf = [0; 65535];
     let mut out = [0; MAX_DATAGRAM_SIZE];
 
@@ -64,31 +68,95 @@ fn main() {
     let cmd = &args.next().unwrap();
 
     if args.len() != 0 {
-        println!("Usage: {cmd}");
+        println!("Usage: {}", cmd);
         println!("\nSee tools/apps/ for more complete implementations.");
         return;
     }
 
     // Setup the event loop.
-    let mut poll = mio::Poll::new().unwrap();
+    let poll = mio::Poll::new().unwrap();
     let mut events = mio::Events::with_capacity(1024);
 
+    let server_addr = "127.0.0.1:4430";
     // Create the UDP listening socket, and register it with the event loop.
-    let mut socket =
-        mio::net::UdpSocket::bind("127.0.0.1:4433".parse().unwrap()).unwrap();
-    poll.registry()
-        .register(&mut socket, mio::Token(0), mio::Interest::READABLE)
+    let socket = net::UdpSocket::bind(server_addr).unwrap();
+
+    let socket = mio::net::UdpSocket::from_socket(socket).unwrap();
+    poll.register(
+        &socket,
+        mio::Token(0),
+        mio::Ready::readable(),
+        mio::PollOpt::edge(),
+    )
+    .unwrap();
+
+    let cert_file = "webtransport_example.crt";
+    let priv_file = "webtransport_example.key";
+
+    // WebTransport certs are required to be rotated such that their expiration date does not exceed 10 days into the future.
+    //
+    // This is equivalent to:
+    // openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -x509 -sha256 -nodes -out webtransport_example.crt -keyout webtransport_example.key -days 10
+    let curve =
+        &EcGroup::from_curve_name(boring::nid::Nid::X9_62_PRIME256V1).unwrap();
+    let key_pair = EcKey::generate(curve).unwrap();
+    let key_pair = PKey::from_ec_key(key_pair).unwrap();
+
+    let mut builder = boring::x509::X509Builder::new().unwrap();
+    builder.set_version(0x2).unwrap();
+    let serial_number = {
+        let mut serial = BigNum::new().unwrap();
+        serial.rand(159, MsbOption::MAYBE_ZERO, false).unwrap();
+        serial.to_asn1_integer().unwrap()
+    };
+    builder.set_serial_number(&serial_number).unwrap();
+    builder
+        .set_not_before(&Asn1Time::days_from_now(0).unwrap())
         .unwrap();
+    builder
+        .set_not_after(&Asn1Time::days_from_now(10).unwrap())
+        .unwrap();
+
+    // Build the x509 issuer and subject names. These are arbitrary.
+    let mut x509_name = boring::x509::X509NameBuilder::new().unwrap();
+    x509_name.append_entry_by_text("C", "US").unwrap();
+    x509_name.append_entry_by_text("ST", "CA").unwrap();
+    x509_name
+        .append_entry_by_text("O", "Some organization")
+        .unwrap();
+
+    let x509_name = x509_name.build();
+    builder.set_issuer_name(&x509_name).unwrap();
+    builder.set_subject_name(&x509_name).unwrap();
+
+    builder.set_pubkey(&key_pair).unwrap();
+
+    builder
+        .append_extension(
+            BasicConstraints::new().critical().ca().build().unwrap(),
+        )
+        .unwrap();
+
+    builder.sign(&key_pair, MessageDigest::sha256()).unwrap();
+
+    // Write the new cert and private key to disk
+    let cert_pem = builder.build().to_pem().unwrap();
+    fs::write(cert_file, cert_pem).unwrap();
+    let priv_pem = key_pair.private_key_to_pem_pkcs8().unwrap();
+    fs::write(priv_file, priv_pem).unwrap();
+
+    // Generate a SHA256 fingerprint from the cert
+    let pem_serialized = fs::read_to_string(cert_file).unwrap();
+    let der_serialized = pem::parse(&pem_serialized).unwrap().contents;
+    let hash = ring::digest::digest(&ring::digest::SHA256, &der_serialized);
+
+    info!("Generated fresh private key and certification (expires in no more then 10 days per WebTransport requirements)");
 
     // Create the configuration for the QUIC connections.
     let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
 
-    config
-        .load_cert_chain_from_pem_file("examples/cert.crt")
-        .unwrap();
-    config
-        .load_priv_key_from_pem_file("examples/cert.key")
-        .unwrap();
+    config.load_cert_chain_from_pem_file(cert_file).unwrap();
+    config.load_priv_key_from_pem_file(priv_file).unwrap();
 
     config
         .set_application_protos(quiche::h3::APPLICATION_PROTOCOL)
@@ -105,16 +173,26 @@ fn main() {
     config.set_initial_max_streams_uni(100);
     config.set_disable_active_migration(true);
     config.enable_early_data();
+    config.enable_dgram(true, 65536, 65536);
 
-    let h3_config = quiche::h3::Config::new().unwrap();
+    // let mut h3_config = quiche::h3::Config::new().unwrap();
 
     let rng = SystemRandom::new();
     let conn_id_seed =
         ring::hmac::Key::generate(ring::hmac::HMAC_SHA256, &rng).unwrap();
 
     let mut clients = ClientMap::new();
-
-    let local_addr = socket.local_addr().unwrap();
+    info!("Server started on {}", server_addr);
+    println!(
+        "Server {:?} Fingerprint:\n{}",
+        hash.algorithm(),
+        hash.as_ref()
+            .into_iter()
+            .into_iter()
+            .map(|b| format!("{:02X}", b))
+            .collect::<Vec<_>>()
+            .join(":")
+    );
 
     loop {
         // Find the shorter timeout from all the active connections.
@@ -131,7 +209,7 @@ fn main() {
             // has expired, so handle it without attempting to read packets. We
             // will then proceed with the send loop.
             if events.is_empty() {
-                debug!("timed out");
+                trace!("timed out");
 
                 clients.values_mut().for_each(|c| c.conn.on_timeout());
 
@@ -145,7 +223,7 @@ fn main() {
                     // There are no more UDP packets to read, so end the read
                     // loop.
                     if e.kind() == std::io::ErrorKind::WouldBlock {
-                        debug!("recv() would block");
+                        trace!("recv() would block");
                         break 'read;
                     }
 
@@ -153,7 +231,7 @@ fn main() {
                 },
             };
 
-            debug!("got {} bytes", len);
+            trace!("got {} bytes", len);
 
             let pkt_buf = &mut buf[..len];
 
@@ -178,8 +256,8 @@ fn main() {
 
             // Lookup a connection based on the packet's connection ID. If there
             // is no connection matching, create a new one.
-            let client = if !clients.contains_key(&hdr.dcid) &&
-                !clients.contains_key(&conn_id)
+            let client = if !clients.contains_key(&hdr.dcid)
+                && !clients.contains_key(&conn_id)
             {
                 if hdr.ty != quiche::Type::Initial {
                     error!("Packet is not Initial");
@@ -195,7 +273,7 @@ fn main() {
 
                     let out = &out[..len];
 
-                    if let Err(e) = socket.send_to(out, from) {
+                    if let Err(e) = socket.send_to(out, &from) {
                         if e.kind() == std::io::ErrorKind::WouldBlock {
                             debug!("send() would block");
                             break;
@@ -232,7 +310,7 @@ fn main() {
 
                     let out = &out[..len];
 
-                    if let Err(e) = socket.send_to(out, from) {
+                    if let Err(e) = socket.send_to(out, &from) {
                         if e.kind() == std::io::ErrorKind::WouldBlock {
                             debug!("send() would block");
                             break;
@@ -263,22 +341,17 @@ fn main() {
 
                 debug!("New connection: dcid={:?} scid={:?}", hdr.dcid, scid);
 
-                let conn = quiche::accept(
-                    &scid,
-                    odcid.as_ref(),
-                    local_addr,
-                    from,
-                    &mut config,
-                )
-                .unwrap();
+                let conn =
+                    quiche::accept(&scid, odcid.as_ref(), from, &mut config)
+                        .unwrap();
 
-                let client = Client {
-                    conn,
-                    http3_conn: None,
-                    partial_responses: HashMap::new(),
-                };
-
-                clients.insert(scid.clone(), client);
+                clients.insert(
+                    scid.clone(),
+                    Client {
+                        conn,
+                        session: None,
+                    },
+                );
 
                 clients.get_mut(&scid).unwrap()
             } else {
@@ -289,10 +362,7 @@ fn main() {
                 }
             };
 
-            let recv_info = quiche::RecvInfo {
-                to: socket.local_addr().unwrap(),
-                from,
-            };
+            let recv_info = quiche::RecvInfo { from };
 
             // Process potentially coalesced packets.
             let read = match client.conn.recv(pkt_buf, recv_info) {
@@ -304,93 +374,118 @@ fn main() {
                 },
             };
 
-            debug!("{} processed {} bytes", client.conn.trace_id(), read);
+            trace!("{} processed {} bytes", client.conn.trace_id(), read);
 
             // Create a new HTTP/3 connection as soon as the QUIC connection
             // is established.
-            if (client.conn.is_in_early_data() || client.conn.is_established()) &&
-                client.http3_conn.is_none()
+            if (client.conn.is_in_early_data() || client.conn.is_established())
+                && client.session.is_none()
             {
                 debug!(
                     "{} QUIC handshake completed, now trying HTTP/3",
                     client.conn.trace_id()
                 );
 
-                let h3_conn = match quiche::h3::Connection::with_transport(
-                    &mut client.conn,
-                    &h3_config,
-                ) {
-                    Ok(v) => v,
-
-                    Err(e) => {
-                        error!("failed to create HTTP/3 connection: {}", e);
-                        continue 'read;
-                    },
-                };
-
-                // TODO: sanity check h3 connection before adding to map
-                client.http3_conn = Some(h3_conn);
+                let server_session =
+                    quiche::h3::webtransport::ServerSession::with_transport(
+                        &mut client.conn,
+                    )
+                    .unwrap();
+                client.session = Some(server_session);
             }
 
-            if client.http3_conn.is_some() {
-                // Handle writable streams.
-                for stream_id in client.conn.writable() {
-                    handle_writable(client, stream_id);
-                }
+            // The `poll` can pull out the events that occurred according to the data passed here.
+            for (_, Client { conn, session }) in clients
+                .iter_mut()
+                .filter(|(_, client)| client.session.is_some())
+            {
+                let server_session = session.as_mut().unwrap();
 
-                // Process HTTP/3 events.
                 loop {
-                    let http3_conn = client.http3_conn.as_mut().unwrap();
+                    match server_session.poll(conn) {
+                        Ok(quiche::h3::webtransport::ServerEvent::ConnectRequest(_req)) => {
+                            // you can handle request with
+                            // req.authority()
+                            // req.path()
+                            // and you can validate this request with req.origin()
+                            server_session.accept_connect_request(conn, None).unwrap();
+                        }
 
-                    match http3_conn.poll(&mut client.conn) {
-                        Ok((
-                            stream_id,
-                            quiche::h3::Event::Headers { list, .. },
-                        )) => {
-                            handle_request(
-                                client,
-                                stream_id,
-                                &list,
-                                "examples/root",
-                            );
-                        },
+                        Ok(quiche::h3::webtransport::ServerEvent::StreamData(stream_id)) => {
+                            let mut buf = vec![0; 10000];
+                            while let Ok(len) =
+                                server_session.recv_stream_data(conn, stream_id, &mut buf)
+                            {
+                                let stream_data = &buf[0..len];
+                                dbg!(String::from_utf8_lossy(stream_data));
 
-                        Ok((_stream_id, quiche::h3::Event::WebTransportStreamData(_session_id))) => (),
+                                // handle stream_data
+                                if (stream_id & 0x2) == 0 {
+                                    // bidirectional stream
+                                    // you can send data through this stream.
+                                    server_session
+                                        .send_stream_data(conn, stream_id, stream_data)
+                                        .unwrap();
+                                } else {
+                                    // you cannot send data through client-initiated-unidirectional-stream.
+                                    // so, open new server-initiated-unidirectional-stream, and send data
+                                    // through it.
+                                    let new_stream_id =
+                                        server_session.open_stream(conn, false).unwrap();
+                                    server_session
+                                        .send_stream_data(conn, new_stream_id, stream_data)
+                                        .unwrap();
+                                }
+                            }
+                        }
 
-                        Ok((stream_id, quiche::h3::Event::Data)) => {
-                            info!(
-                                "{} got data on stream id {}",
-                                client.conn.trace_id(),
-                                stream_id
-                            );
-                        },
+                        Ok(quiche::h3::webtransport::ServerEvent::StreamFinished(stream_id)) => {
+                            // A WebTrnasport stream finished, handle it.
+                            info!("Stream finished {:?}", stream_id)
+                        }
 
-                        Ok((_stream_id, quiche::h3::Event::Finished)) => (),
+                        Ok(quiche::h3::webtransport::ServerEvent::Datagram) => {
+                            info!("Received a datagram!");
+                            let mut buf = vec![0; 1500];
+                            while let Ok((in_session, offset, total)) =
+                                server_session.recv_dgram(conn, &mut buf)
+                            {
+                                if in_session {
+                                    let dgram = &buf[offset..total];
+                                    dbg!(std::string::String::from_utf8_lossy(dgram));
+                                    // handle this dgram
 
-                        Ok((_stream_id, quiche::h3::Event::Reset { .. })) => (),
+                                    // for instance, you can write echo-server like following
+                                    server_session.send_dgram(conn, dgram).unwrap();
+                                } else {
+                                    // this dgram is not related to current WebTransport session. ignore.
+                                }
+                            }
+                        }
 
-                        Ok((_flow_id, quiche::h3::Event::Datagram)) => (),
+                        Ok(quiche::h3::webtransport::ServerEvent::SessionReset(_e)) => {
+                            // Peer reset session stream, handle it.
+                        }
 
-                        Ok((
-                            _prioritized_element_id,
-                            quiche::h3::Event::PriorityUpdate,
-                        )) => (),
+                        Ok(quiche::h3::webtransport::ServerEvent::SessionFinished) => {
+                            // Peer finish session stream, handle it.
+                        }
 
-                        Ok((_goaway_id, quiche::h3::Event::GoAway)) => (),
+                        Ok(quiche::h3::webtransport::ServerEvent::SessionGoAway) => {
+                            // Peer signalled it is going away, handle it.
+                        }
 
-                        Err(quiche::h3::Error::Done) => {
+                        Ok(quiche::h3::webtransport::ServerEvent::Other(_stream_id, _event)) => {
+                            // Original h3::Event which is not related to WebTransport.
+                        }
+
+                        Err(quiche::h3::webtransport::Error::Done) => {
                             break;
-                        },
+                        }
 
-                        Err(e) => {
-                            error!(
-                                "{} HTTP/3 error {:?}",
-                                client.conn.trace_id(),
-                                e
-                            );
-
+                        Err(_e) => {
                             break;
-                        },
+                        }
                     }
                 }
             }
@@ -405,7 +500,7 @@ fn main() {
                     Ok(v) => v,
 
                     Err(quiche::Error::Done) => {
-                        debug!("{} done writing", client.conn.trace_id());
+                        trace!("{} done writing", client.conn.trace_id());
                         break;
                     },
 
@@ -417,29 +512,24 @@ fn main() {
                     },
                 };
 
-                if let Err(e) = socket.send_to(&out[..write], send_info.to) {
+                if let Err(e) = socket.send_to(&out[..write], &send_info.to) {
                     if e.kind() == std::io::ErrorKind::WouldBlock {
-                        debug!("send() would block");
+                        trace!("send() would block");
                         break;
                     }
 
                     panic!("send() failed: {:?}", e);
                 }
 
-                debug!("{} written {} bytes", client.conn.trace_id(), write);
+                trace!("{} written {} bytes", client.conn.trace_id(), write);
             }
         }
 
         // Garbage collect closed connections.
-        clients.retain(|_, ref mut c| {
-            debug!("Collecting garbage");
-
+        clients.retain(|_, c| {
             if c.conn.is_closed() {
-                info!(
-                    "{} connection collected {:?}",
-                    c.conn.trace_id(),
-                    c.conn.stats()
-                );
+                // info!("{} connection collected {:?}", c.conn.trace_id(), c.conn.stats());
+                info!("connection collected {}", c.conn.trace_id());
             }
 
             !c.conn.is_closed()
@@ -501,184 +591,4 @@ fn validate_token<'a>(
     }
 
     Some(quiche::ConnectionId::from_ref(&token[addr.len()..]))
-}
-
-/// Handles incoming HTTP/3 requests.
-fn handle_request(
-    client: &mut Client, stream_id: u64, headers: &[quiche::h3::Header],
-    root: &str,
-) {
-    let conn = &mut client.conn;
-    let http3_conn = &mut client.http3_conn.as_mut().unwrap();
-
-    info!(
-        "{} got request {:?} on stream id {}",
-        conn.trace_id(),
-        hdrs_to_strings(headers),
-        stream_id
-    );
-
-    // We decide the response based on headers alone, so stop reading the
-    // request stream so that any body is ignored and pointless Data events
-    // are not generated.
-    conn.stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
-        .unwrap();
-
-    let (headers, body) = build_response(root, headers);
-
-    match http3_conn.send_response(conn, stream_id, &headers, false) {
-        Ok(v) => v,
-
-        Err(quiche::h3::Error::StreamBlocked) => {
-            let response = PartialResponse {
-                headers: Some(headers),
-                body,
-                written: 0,
-            };
-
-            client.partial_responses.insert(stream_id, response);
-            return;
-        },
-
-        Err(e) => {
-            error!("{} stream send failed {:?}", conn.trace_id(), e);
-            return;
-        },
-    }
-
-    let written = match http3_conn.send_body(conn, stream_id, &body, true) {
-        Ok(v) => v,
-
-        Err(quiche::h3::Error::Done) => 0,
-
-        Err(e) => {
-            error!("{} stream send failed {:?}", conn.trace_id(), e);
-            return;
-        },
-    };
-
-    if written < body.len() {
-        let response = PartialResponse {
-            headers: None,
-            body,
-            written,
-        };
-
-        client.partial_responses.insert(stream_id, response);
-    }
-}
-
-/// Builds an HTTP/3 response given a request.
-fn build_response(
-    root: &str, request: &[quiche::h3::Header],
-) -> (Vec<quiche::h3::Header>, Vec<u8>) {
-    let mut file_path = std::path::PathBuf::from(root);
-    let mut path = std::path::Path::new("");
-    let mut method = None;
-
-    // Look for the request's path and method.
-    for hdr in request {
-        match hdr.name() {
-            b":path" =>
-                path = std::path::Path::new(
-                    std::str::from_utf8(hdr.value()).unwrap(),
-                ),
-
-            b":method" => method = Some(hdr.value()),
-
-            _ => (),
-        }
-    }
-
-    let (status, body) = match method {
-        Some(b"GET") => {
-            for c in path.components() {
-                if let std::path::Component::Normal(v) = c {
-                    file_path.push(v)
-                }
-            }
-
-            match std::fs::read(file_path.as_path()) {
-                Ok(data) => (200, data),
-
-                Err(_) => (404, b"Not Found!".to_vec()),
-            }
-        },
-
-        _ => (405, Vec::new()),
-    };
-
-    let headers = vec![
-        quiche::h3::Header::new(b":status", status.to_string().as_bytes()),
-        quiche::h3::Header::new(b"server", b"quiche"),
-        quiche::h3::Header::new(
-            b"content-length",
-            body.len().to_string().as_bytes(),
-        ),
-    ];
-
-    (headers, body)
-}
-
-/// Handles newly writable streams.
-fn handle_writable(client: &mut Client, stream_id: u64) {
-    let conn = &mut client.conn;
-    let http3_conn = &mut client.http3_conn.as_mut().unwrap();
-
-    debug!("{} stream {} is writable", conn.trace_id(), stream_id);
-
-    if !client.partial_responses.contains_key(&stream_id) {
-        return;
-    }
-
-    let resp = client.partial_responses.get_mut(&stream_id).unwrap();
-
-    if let Some(ref headers) = resp.headers {
-        match http3_conn.send_response(conn, stream_id, headers, false) {
-            Ok(_) => (),
-
-            Err(quiche::h3::Error::StreamBlocked) => {
-                return;
-            },
-
-            Err(e) => {
-                error!("{} stream send failed {:?}", conn.trace_id(), e);
-                return;
-            },
-        }
-    }
-
-    resp.headers = None;
-
-    let body = &resp.body[resp.written..];
-
-    let written = match http3_conn.send_body(conn, stream_id, body, true) {
-        Ok(v) => v,
-
-        Err(quiche::h3::Error::Done) => 0,
-
-        Err(e) => {
-            client.partial_responses.remove(&stream_id);
-
-            error!("{} stream send failed {:?}", conn.trace_id(), e);
-            return;
-        },
-    };
-
-    resp.written += written;
-
-    if resp.written == resp.body.len() {
-        client.partial_responses.remove(&stream_id);
-    }
-}
-
-pub fn hdrs_to_strings(hdrs: &[quiche::h3::Header]) -> Vec<(String, String)> {
-    hdrs.iter()
-        .map(|h| {
-            let name = String::from_utf8_lossy(h.name()).to_string();
-            let value = String::from_utf8_lossy(h.value()).to_string();
-
-            (name, value)
-        })
-        .collect()
 }

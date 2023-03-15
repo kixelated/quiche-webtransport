@@ -20,6 +20,15 @@ const CMAKE_PARAMS_IOS: &[(&str, &[(&str, &str)])] = &[
     ]),
 ];
 
+const CMAKE_PARAMS_OSX: &[(&str, &[(&str, &str)])] = &[
+    ("aarch64", &[
+        ("CMAKE_OSX_ARCHITECTURES", "arm64"),
+    ]),
+    ("x86_64", &[
+        ("CMAKE_OSX_ARCHITECTURES", "x86_64"),
+    ]),
+];
+
 // ARM Linux.
 const CMAKE_PARAMS_ARM_LINUX: &[(&str, &[(&str, &str)])] = &[
     ("aarch64", &[("CMAKE_SYSTEM_PROCESSOR", "aarch64")]),
@@ -32,7 +41,7 @@ const CMAKE_PARAMS_ARM_LINUX: &[(&str, &[(&str, &str)])] = &[
 /// so adjust library location based on platform and build target.
 /// See issue: https://github.com/alexcrichton/cmake-rs/issues/18
 fn get_boringssl_platform_output_path() -> String {
-    if cfg!(target_env = "msvc") {
+    if cfg!(windows) {
         // Code under this branch should match the logic in cmake-rs
         let debug_env_var =
             std::env::var("DEBUG").expect("DEBUG variable not defined in env");
@@ -112,18 +121,36 @@ fn get_boringssl_cmake_config() -> cmake::Config {
             // Bitcode is always on.
             let bitcode_cflag = "-fembed-bitcode";
 
-            // Hack for Xcode 10.1.
+            let min_version_cflag = match arch.as_str() {
+                "aarch64" => "-mios-version-min=10.0",
+                "x86_64"  => "-mios-simulator-version-min=10.0",
+                _         => "",
+            };
+
+              // Hack for Xcode 10.1.
             let target_cflag = if arch == "x86_64" {
                 "-target x86_64-apple-ios-simulator"
             } else {
                 ""
             };
 
-            let cflag = format!("{bitcode_cflag} {target_cflag}");
+            let cflag = format!("{} {} {}", bitcode_cflag, min_version_cflag, target_cflag);
 
+            // Hack for Xcode 10.1.
             boringssl_cmake.define("CMAKE_ASM_FLAGS", &cflag);
             boringssl_cmake.cflag(&cflag);
 
+            boringssl_cmake
+        },
+
+        "macos" => {
+            for (osx_arch, params) in CMAKE_PARAMS_OSX {
+                if *osx_arch == arch {
+                    for (name, value) in *params {
+                        boringssl_cmake.define(name, value);
+                    }
+                }
+            }
             boringssl_cmake
         },
 
@@ -192,7 +219,7 @@ libdir={}
 Name: quiche
 Description: quiche library
 URL: https://github.com/cloudflare/quiche
-Version: {version}
+Version: {}
 Libs: -Wl,-rpath,${{libdir}} -L${{libdir}} -lquiche
 Cflags: -I${{includedir}}
 ",
