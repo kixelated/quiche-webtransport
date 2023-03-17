@@ -761,7 +761,7 @@ mod tests {
             raw: Some(raw_settings),
         };
 
-        let frame_payload_len = 16;
+        let frame_payload_len = 18;
         let frame_header_len = 2;
 
         let wire_len = {
@@ -820,7 +820,7 @@ mod tests {
             raw: Some(raw_settings),
         };
 
-        let frame_payload_len = 18;
+        let frame_payload_len = 20;
         let frame_header_len = 2;
 
         let wire_len = {
@@ -891,6 +891,7 @@ mod tests {
             qpack_blocked_streams: None,
             connect_protocol_enabled: Some(1),
             h3_datagram: None,
+            enable_webtransport: None,
             grease: None,
             raw: Some(raw_settings),
         };
@@ -928,6 +929,7 @@ mod tests {
             qpack_blocked_streams: None,
             connect_protocol_enabled: Some(9),
             h3_datagram: None,
+            enable_webtransport: None,
             grease: None,
             raw: Some(raw_settings),
         };
@@ -1035,6 +1037,7 @@ mod tests {
             max_field_section_size: None,
             qpack_max_table_capacity: None,
             qpack_blocked_streams: None,
+            connect_protocol_enabled: None,
             h3_datagram: Some(1),
             enable_webtransport: Some(1),
             grease: None,

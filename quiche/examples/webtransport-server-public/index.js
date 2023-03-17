@@ -23,7 +23,7 @@ async function startClientTests(args, hashes) {
     }
     // eslint-disable-next-line no-undef
     console.log('hashagrs', hashargs)
-    const transport = new WebTransport(url)
+    const transport = new WebTransport(url,hashargs)
     transport.closed
         .then(() => {
             console.log('The HTTP/3 connection to ', url, 'closed gracefully.')
@@ -109,7 +109,7 @@ window.onFingerprintSubmit = () => {
     console.log(`fingerprint: "${fingerprint}"`)
 
     startClientTests(
-        { hostname: '127.0.0.1', port: 4430 },
+        { hostname: '127.0.0.1', port: 4443 },
         {
             serverCertificateHashes: [
                 {

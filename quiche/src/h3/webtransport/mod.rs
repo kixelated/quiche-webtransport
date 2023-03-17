@@ -32,8 +32,9 @@
 //! ```no_run
 //! # let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
 //! # let scid = quiche::ConnectionId::from_ref(&[0xba; 16]);
-//! # let addr = "127.0.0.1:1234".parse().unwrap();
-//! # let mut conn = quiche::connect(Some("quic.tech"), &scid, addr, &mut config)?;
+//! # let peer = "127.0.0.1:1234".parse().unwrap();
+//! # let local = "127.0.0.1:4321".parse().unwrap();
+//! # let mut conn = quiche::connect(None, &scid, local, peer, &mut config).unwrap();
 //! let client_session = quiche::h3::webtransport::ClientSession::with_transport(&mut conn)?;
 //! # Ok::<(), quiche::h3::webtransport::Error>(())
 //! ```
@@ -43,8 +44,9 @@
 //! ```no_run
 //! # let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
 //! # let scid = quiche::ConnectionId::from_ref(&[0xba; 16]);
-//! # let from = "127.0.0.1:1234".parse().unwrap();
-//! # let mut conn = quiche::accept(&scid, None, from, &mut config).unwrap();
+//! # let peer = "127.0.0.1:1234".parse().unwrap();
+//! # let local = "127.0.0.1:1234".parse().unwrap();
+//! # let mut conn = quiche::accept(&scid, None, local, peer, &mut config).unwrap();
 //! let server_session = quiche::h3::webtransport::ServerSession::with_transport(&mut conn)?;
 //! # Ok::<(), quiche::h3::webtransport::Error>(())
 //! ```
@@ -59,8 +61,9 @@
 //! ```no_run
 //! # let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
 //! # let scid = quiche::ConnectionId::from_ref(&[0xba; 16]);
-//! # let addr = "127.0.0.1:1234".parse().unwrap();
-//! # let mut conn = quiche::connect(Some("quic.tech"), &scid, addr, &mut config)?;
+//! # let peer = "127.0.0.1:1234".parse().unwrap();
+//! # let local = "127.0.0.1:4321".parse().unwrap();
+//! # let mut conn = quiche::connect(None, &scid, local, peer, &mut config).unwrap();
 //! let mut client_session = quiche::h3::webtransport::ClientSession::with_transport(&mut conn)?;
 //! // After received peer's SETTINGS frame,
 //! client_session.send_connect_request(&mut conn, b"authority.quic.tech:1234", b"/path", b"origin.quic.tech", None);
@@ -79,8 +82,9 @@
 //! ```no_run
 //! # let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
 //! # let scid = quiche::ConnectionId::from_ref(&[0xba; 16]);
-//! # let from = "127.0.0.1:1234".parse().unwrap();
-//! # let mut conn = quiche::accept(&scid, None, from, &mut config).unwrap();
+//! # let peer = "127.0.0.1:1234".parse().unwrap();
+//! # let local = "127.0.0.1:1234".parse().unwrap();
+//! # let mut conn = quiche::accept(&scid, None, local, peer, &mut config).unwrap();
 //! let mut server_session = quiche::h3::webtransport::ServerSession::with_transport(&mut conn)?;
 //!
 //! // Before executing the poll, pass the packet received from the UDP socket
@@ -195,8 +199,10 @@
 //! ```no_run
 //! # let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
 //! # let scid = quiche::ConnectionId::from_ref(&[0xba; 16]);
-//! # let addr = "127.0.0.1:1234".parse().unwrap();
-//! # let mut conn = quiche::connect(Some("quic.tech"), &scid, addr, &mut config)?;
+//! # let peer = "127.0.0.1:1234".parse().unwrap();
+//! # let local = "127.0.0.1:4321".parse().unwrap();
+//! # let mut conn = quiche::connect(None, &scid, local, peer, &mut config).unwrap();
+//!
 //! let mut client_session = quiche::h3::webtransport::ClientSession::with_transport(&mut conn)?;
 //!
 //! // Before executing the poll, pass the packet received from the UDP socket

@@ -31,7 +31,6 @@ use std::fs;
 use std::net;
 
 use std::collections::HashMap;
-use std::pin::Pin;
 
 use boring::asn1::Asn1Time;
 use boring::bn::BigNum;
@@ -47,7 +46,7 @@ use ring::rand::*;
 
 const MAX_DATAGRAM_SIZE: usize = 1350;
 struct Client {
-    conn: Pin<Box<quiche::Connection>>,
+    conn: quiche::Connection,
 
     session: Option<ServerSession>,
 }
@@ -57,41 +56,30 @@ type ClientMap = HashMap<quiche::ConnectionId<'static>, Client>;
 // A WebTransport Server. In order to connect to this server you'll need a web frontend such
 // as the example frontend provided in `webtransport-server-public/index.html`
 fn main() {
-    env_logger::Builder::from_env(Env::default().default_filter_or("info"))
+    env_logger::Builder::from_env(Env::default().default_filter_or("debug"))
         .init();
 
     let mut buf = [0; 65535];
     let mut out = [0; MAX_DATAGRAM_SIZE];
 
-    let mut args = std::env::args();
-
-    let cmd = &args.next().unwrap();
-
-    if args.len() != 0 {
-        println!("Usage: {}", cmd);
-        println!("\nSee tools/apps/ for more complete implementations.");
-        return;
-    }
-
     // Setup the event loop.
-    let poll = mio::Poll::new().unwrap();
+    let mut poll = mio::Poll::new().unwrap();
     let mut events = mio::Events::with_capacity(1024);
 
-    let server_addr = "127.0.0.1:4430";
+    let server_addr = "127.0.0.1:4443".parse().unwrap();
     // Create the UDP listening socket, and register it with the event loop.
-    let socket = net::UdpSocket::bind(server_addr).unwrap();
+    let mut socket = mio::net::UdpSocket::bind(server_addr).unwrap();
 
-    let socket = mio::net::UdpSocket::from_socket(socket).unwrap();
-    poll.register(
-        &socket,
+    poll.registry().register(
+        &mut socket,
         mio::Token(0),
-        mio::Ready::readable(),
-        mio::PollOpt::edge(),
-    )
-    .unwrap();
+        mio::Interest::READABLE,
+    ).unwrap();
+
 
     let cert_file = "webtransport_example.crt";
     let priv_file = "webtransport_example.key";
+
 
     // WebTransport certs are required to be rotated such that their expiration date does not exceed 10 days into the future.
     //
@@ -150,7 +138,7 @@ fn main() {
     let der_serialized = pem::parse(&pem_serialized).unwrap().contents;
     let hash = ring::digest::digest(&ring::digest::SHA256, &der_serialized);
 
-    info!("Generated fresh private key and certification (expires in no more then 10 days per WebTransport requirements)");
+    info!("Current Dir: {}",std::env::current_dir().unwrap().to_str().unwrap());
 
     // Create the configuration for the QUIC connections.
     let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
@@ -174,6 +162,8 @@ fn main() {
     config.set_disable_active_migration(true);
     config.enable_early_data();
     config.enable_dgram(true, 65536, 65536);
+
+    let local_addr = socket.local_addr().unwrap();
 
     // let mut h3_config = quiche::h3::Config::new().unwrap();
 
@@ -273,7 +263,7 @@ fn main() {
 
                     let out = &out[..len];
 
-                    if let Err(e) = socket.send_to(out, &from) {
+                    if let Err(e) = socket.send_to(out, from) {
                         if e.kind() == std::io::ErrorKind::WouldBlock {
                             debug!("send() would block");
                             break;
@@ -310,7 +300,7 @@ fn main() {
 
                     let out = &out[..len];
 
-                    if let Err(e) = socket.send_to(out, &from) {
+                    if let Err(e) = socket.send_to(out, from) {
                         if e.kind() == std::io::ErrorKind::WouldBlock {
                             debug!("send() would block");
                             break;
@@ -342,7 +332,7 @@ fn main() {
                 debug!("New connection: dcid={:?} scid={:?}", hdr.dcid, scid);
 
                 let conn =
-                    quiche::accept(&scid, odcid.as_ref(), from, &mut config)
+                    quiche::accept(&scid, odcid.as_ref(), local_addr, from, &mut config)
                         .unwrap();
 
                 clients.insert(
@@ -362,7 +352,10 @@ fn main() {
                 }
             };
 
-            let recv_info = quiche::RecvInfo { from };
+            let recv_info = quiche::RecvInfo {
+                to: socket.local_addr().unwrap(),
+                from,
+            };
 
             // Process potentially coalesced packets.
             let read = match client.conn.recv(pkt_buf, recv_info) {
@@ -512,7 +505,7 @@ fn main() {
                     },
                 };
 
-                if let Err(e) = socket.send_to(&out[..write], &send_info.to) {
+                if let Err(e) = socket.send_to(&out[..write], send_info.to) {
                     if e.kind() == std::io::ErrorKind::WouldBlock {
                         trace!("send() would block");
                         break;
